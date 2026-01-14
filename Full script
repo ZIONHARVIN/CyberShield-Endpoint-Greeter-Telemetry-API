@@ -1,0 +1,210 @@
+1) Create the project + venv
+
+mkdir -p ~/cybershield-greeter/assets
+cd ~/cybershield-greeter
+
+python3 -m venv venv
+source venv/bin/activate
+
+pip install fastapi uvicorn
+
+pip install psutil
+
+2) Add the startup music file
+Put your MP3 here:
+
+~/cybershield-greeter/assets/startup.mp3
+Check it exists:
+
+ls -l ~/cybershield-greeter/assets/startup.mp3
+Test the MP3 plays on macOS:
+
+afplay ~/cybershield-greeter/assets/startup.mp3
+If that doesn’t play, the API can’t play it either.
+
+3) Create the API (FastAPI + greeting + music)
+from fastapi import FastAPI
+from datetime import datetime
+import getpass
+import psutil
+import time
+import subprocess
+from pathlib import Path
+import os
+
+app = FastAPI()
+
+# --- Audio config ---
+# Default: ~/cybershield-greeter/assets/startup.mp3
+# You can override with: export CYBERSHIELD_SFX="/full/path/to/file.mp3"
+DEFAULT_SFX = Path.home() / "cybershield-greeter" / "assets" / "startup.mp3"
+SFX = Path(os.environ.get("CYBERSHIELD_SFX", str(DEFAULT_SFX))).expanduser()
+
+# Optional: only play the first N seconds (set to None to play full file)
+SFX_PLAY_SECONDS = 10  # change to None to play the whole file
+
+
+def play_scifi_sfx() -> None:
+    """
+    Play a sci-fi startup sound using macOS 'afplay'.
+    Runs in background so the API doesn't block.
+    """
+    # Quick visibility while testing; remove later if you want
+    print("DEBUG: play_scifi_sfx() called")
+    print(f"DEBUG: expecting SFX at: {SFX}")
+
+    if not SFX.exists():
+        print("DEBUG: SFX file not found.")
+        return
+
+    try:
+        # Start the sound
+        proc = subprocess.Popen(
+            ["afplay", str(SFX)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        print("DEBUG: afplay launched")
+
+        # If you only want the first N seconds, stop it after N seconds
+        if isinstance(SFX_PLAY_SECONDS, (int, float)) and SFX_PLAY_SECONDS > 0:
+            def _stop_after_delay(p: subprocess.Popen, delay: float) -> None:
+                time.sleep(delay)
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+
+            # Stop in a separate lightweight background process/thread
+            # Using a thread avoids blocking the request.
+            import threading
+            threading.Thread(
+                target=_stop_after_delay,
+                args=(proc, float(SFX_PLAY_SECONDS)),
+                daemon=True
+            ).start()
+
+    except FileNotFoundError:
+        print("DEBUG: 'afplay' not found. This should exist on macOS.")
+    except Exception as e:
+        print(f"DEBUG: failed to launch afplay: {e}")
+
+
+def time_greeting(hour: int) -> str:
+    if 5 <= hour <= 11:
+        return "Top of the morning to you"
+    if 12 <= hour <= 16:
+        return "Your afternoon lacks sufficient shenanigans"
+    if 17 <= hour <= 21:
+        return "Cheers to surviving another day! Enjoy your evening"
+    return (
+        "They say 'early bird gets the worm,' but I'm more of a 'midnight moth'—"
+        "attracted to the glow of my screen"
+    )
+
+
+def uptime_string(seconds: float) -> str:
+    seconds = int(seconds)
+    days, rem = divmod(seconds, 86400)
+    hrs, rem = divmod(rem, 3600)
+    mins, _ = divmod(rem, 60)
+    if days > 0:
+        return f"{days}d {hrs}h {mins}m"
+    return f"{hrs}h {mins}m"
+
+
+@app.get("/greet")
+def greet():
+    play_scifi_sfx()
+    time.sleep(1.2)  # lets the sound start before the response
+
+    user = getpass.getuser()
+
+    now_dt = datetime.now()
+    t = now_dt.strftime("%I:%M %p").lstrip("0")
+
+    cpu = psutil.cpu_percent(interval=0.2)
+    uptime = uptime_string(time.time() - psutil.boot_time())
+
+    greeting = time_greeting(now_dt.hour)
+
+    message = (
+        f"{greeting}. "
+        f"Session authenticated. Networking running. CyberShield Systems online, {user}. "
+        f"You have the green light. "
+        f"Time: {t}. CPU: {cpu:.0f}%. Uptime: {uptime}."
+    )
+    return {"message": message}
+
+
+4) Run the API (the “combine everything” command)
+Important: run it from the project folder to avoid import issues:
+
+cd ~/cybershield-greeter
+~/cybershield-greeter/venv/bin/uvicorn main:app --host 127.0.0.1 --port 5050
+
+5) Test the API (music + message)
+In a new Terminal tab:
+
+curl http://127.0.0.1:5050/greet
+Expected:
+* You get JSON back with your message
+* Your startup.mp3 plays right when you curl /greet
+
+6) How login_greet.sh triggers the whole thing
+Your login script does 3 jobs:
+1. Calls your API (curl /greet)
+2. Extracts the "message" from JSON
+3. Pops it up (dialog) + speaks it (optional)
+Create/edit:
+
+nano ~/cybershield-greeter/login_greet.sh
+Use this (reliable at login):
+
+#!/bin/bash
+
+API_URL="http://127.0.0.1:5050/greet"
+MAX_RETRIES=15
+SLEEP_TIME=1
+
+for i in $(seq 1 $MAX_RETRIES); do
+  RESPONSE=$(/usr/bin/curl -s --max-time 2 "$API_URL")
+
+  if [[ -n "$RESPONSE" ]]; then
+    MSG=$(echo "$RESPONSE" | /usr/bin/python3 -c "import sys,json; print(json.load(sys.stdin)['message'])")
+
+    # Pop-up (center screen)
+    /usr/bin/osascript -e "display dialog \"$MSG\" with title \"CyberShield IT\" buttons {\"OK\"} giving up after 5"
+
+    # Optional voice (keep or remove)
+    /usr/bin/say "$MSG"
+
+    exit 0
+  fi
+
+  sleep $SLEEP_TIME
+done
+
+exit 0
+Make it executable:
+
+chmod +x ~/cybershield-greeter/login_greet.sh
+Manual test:
+
+~/cybershield-greeter/login_greet.sh
+When you run that script:
+* It hits /greet
+* /greet plays the MP3
+* Then script shows dialog + says message
+So the sound is actually triggered by the API endpoint being called.
+
+Quick reality check (important)
+If the MP3 plays when you run:
+
+afplay ~/cybershield-greeter/assets/startup.mp3
+but doesn’t play when /greet is hit, then the usual causes are:
+* The API is running under a context that can’t use audio (rare on macOS user session, more common if running as daemon/root)
+* The MP3 path is wrong
+* afplay isn’t found (unlikely)
+* The API is running, but your code path doesn’t call play_scifi_sfx()
